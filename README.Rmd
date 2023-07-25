@@ -1,0 +1,48 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-",
+  out.width = "100%"
+)
+```
+
+# NetBlotch
+
+<!-- badges: start -->
+<!-- badges: end -->
+
+The goal of NetBlotch is to investigate fungicide resistance management of net blotch in Western Australia.
+
+## Installation
+
+You can install the development version of NetBlotch like so:
+
+``` r
+#install.packages("devtools")
+library(devtools)
+install_github("joehelps/netblotch_2023")
+```
+
+## Example
+
+This is a basic example which shows you how to run the model:
+
+```{r example}
+library(NetBlotch)
+
+pars <- parameters(n_years = 5)
+
+sim <- simulate(pars)
+
+```
+
+## Paper figures
+
+The figures in the paper can be reproduced using the code in `Figures.Rmd` in this repository.

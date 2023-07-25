@@ -1,0 +1,825 @@
+---
+title: "Resubmission"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(NetBlotch)
+library(parallel)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggthemes) # Using this to add extra lines to facet_wrap graphs
+library(ggpubr)
+library(gridExtra)
+library(ggh4x)
+
+RESIM = TRUE # Flag - whether to resimulate all the results
+SAVE = TRUE # Flag - whether to save figures or not
+
+```
+
+## Introduction
+
+This document includes code to reproduce the figures in Helps (2023 hopefully, in press).
+
+## Model / methods
+
+### Parameterisation
+
+The following gives the default parameterisation used for each case in the papers. The default parameters can therefore be obtained by running `par <- default_par(20)` if you want to simulate 20 years.
+
+```{r default_parameters}
+
+default_par<-function(n_years = 50){
+  p <- parameters()
+  f1 = data.frame(
+    Fungicide = c(2,1,3),
+    Dose = 1,
+    Time = c(0,400,700)
+  )
+  f2 = data.frame(
+    Fungicide = c(3,1,3),
+    Dose = 1,
+    Time = c(0,400,700)
+  )
+  f3 = data.frame(
+    Fungicide = c(3,3,3),
+    Dose = 1,
+    Time = c(0,400,700)
+  )
+  mngmt = create_management(field1 = f1, field2 = f2, field3 = f3,n_years = n_years)
+  p$management = mngmt
+  p$n_years = n_years
+  p
+}
+
+```
+
+### Tests
+
+These two tests just check that resistance develops to each fungicide.
+
+Firstly, to the azole:
+
+```{r test_azole_res}
+
+parms <- default_par()
+parms$n_years = 20
+parms$field_size = c(0.8,0.1,0.1)
+f1 = data.frame(Field = 1,Fungicide = 1,Year = 1,Time = c(400,700),Dose = 1)
+parms$management = create_management(f1,n_years = parms$n_years)
+sim <- parms |> simulate()
+sf <- sim |> calculate_strain_frequency()
+
+ggplot(subset(sf,DD == 1200),aes(x=time,y=100 * Freq,color = factor(Strain))) +
+   geom_line() +
+   labs(x="Time (years)",y="Frequency (%)",color="Strain") +
+   facet_wrap(~Field)
+
+```
+
+Or if we just spray the SHDI:
+
+```{r test_SDHI_res}
+
+parms <- default_par()
+parms$n_years = 20
+parms$field_size = c(0.9,0.05,0.05)
+parms$management = data.frame(Field = 1,Fungicide = 2,Year = seq_len(parms$n_years),Time = 600,Dose = 1)
+sim <- parms |> simulate()
+sf <- sim |> calculate_strain_frequency()
+
+ggplot(subset(sf,DD == 1200),aes(x=time,y=Freq,color = factor(Strain))) +
+   geom_line() +
+   labs(x="Time (years)",y="Frequency (%)",color="Strain") +
+   facet_wrap(~Field)
+
+```
+
+### Figure 3
+
+```{r figure_3}
+
+# HAI over time, with data
+LAI_data = data.frame(DegreeDay = seq(0,1200,100),
+                 NinetyFour = c(0.01,0.02,0.06,0.2,0.36,0.5,0.699,0.9,1.0,0.8,0.6999,0.4,0.2),
+                 NinetyFive = c(0.0,0.0,0.045,0.364,0.318,0.5,0.864,0.591,1.0,0.864,0.773,0.682,0.0364))
+parms <- default_par()
+parms$transmission_rate = 0.0
+parms$n_years = 1
+abc = simulate(parms)
+fig3.1 <- ggplot(abc,aes(x=DD,y=H.F1 / (max(H.F1)+0.1))) + 
+  geom_line() +
+  theme_classic() + 
+  geom_point(data=LAI_data,aes(x=DegreeDay,y=NinetyFour,shape=as.factor(1994))) +
+  geom_point(data=LAI_data,aes(x=DegreeDay,y=NinetyFive,shape=as.factor(1995))) +
+  theme(legend.position = "none") +
+  labs(y="Relative healthy area index",x="Time (degree days)",shape="Observations:",linetype="Simulation:")
+
+# Severity over time
+severity_data = data.frame(GS = c(31,33,55,85,55,65,75,85,45,60,90,25,35,45,59,69,73,83),
+                           sev = c(14.25,15,18.75,35.6,15.4,17.9,30,49.1,7.45,20.8,39.2,2,8,14,15.2,21.2,30,36.8),
+                           thermal_time = c(341,363,605,935,605,715,825,935,495,660,990,275,385,495,649,759,803,913),
+                           rep = c(1,1,1,1,2,2,2,2,3,3,3,4,4,4,4,4,4,4))
+parms <- default_par()
+parms$n_years = 1
+parms$management = data.frame(Field=numeric(),Fungicide = numeric(),Year=numeric(),Time=numeric(),Dose=numeric())
+abc = simulate(parms) |> 
+   calculate_severity()
+fig3.2 <- ggplot(abc,aes(x=DD,y=100*field.1)) + 
+   geom_line() +
+   theme_classic() +
+   geom_point(data=severity_data,aes(x=thermal_time,y=sev)) +
+   theme(legend.position = "none") +
+   labs(x="Time (degree days)",y="Severity (%)")
+
+# Dose-response curves
+dose = seq(0,1,0.1)
+dr_curve = expand.grid(Fung = 1:3,Res = c(1,2),Dose = dose,Case = c(1,2))
+dr_curve$sev = NA
+for(i in 1:nrow(dr_curve)){
+   parms = default_par()
+   if(dr_curve$Case[i] == 2){
+      parms$dose_response_asymptote[2,c(1,2)] = 0.5
+      parms$dose_response_asymptote[3,] = 0.3
+   }
+   parms$n_years = 1
+   parms$management = data.frame(Field = 1,Fungicide = dr_curve$Fung[i],Year = 1,Time = 700,Dose = dr_curve$Dose[i])
+   parms$initial_resistance_frequency = rep(ifelse(dr_curve$Res[i] == 1,0,1),2)
+   sim<-parms |> simulate() |> calculate_severity()
+   dr_curve$sev[i] = sim$field.1[1001]
+}
+dr_curve$Fung = factor(c("Azole","SDHI","Multi-site")[dr_curve$Fung],levels=c("Azole","SDHI","Multi-site"))
+dr_curve$Res = factor(c("S","R")[dr_curve$Res],levels=c("S","R"))
+dr_curve$Case = factor(dr_curve$Case)
+
+dr_curve_2 <- dr_curve |> 
+  group_by(Fung,Res,Case) |> 
+  mutate(rel_sev = sev / sev[Dose==0]) |> 
+  ungroup()
+
+propiconazole_data = data.frame(Dose = c(0,0.25,0.5,1.0,2.0),
+                           rel_sev.S = c(1,0.7033,0.501,0.270,0.279),
+                           rel_sev.R = c(1,1.05,0.910,0.933,0.85))
+fig3.3 <- ggplot(subset(dr_curve_2,Fung=="Azole" & Case == 1),aes(x=Dose,y=rel_sev,linetype=Res)) +
+   geom_line() +
+   geom_point(data=propiconazole_data,aes(x=Dose,y=rel_sev.S,linetype="S")) +
+   geom_point(data=propiconazole_data,aes(x=Dose,y=rel_sev.R,linetype="R")) +
+  theme_classic() +
+   scale_y_continuous(limits = c(0,1)) +
+   scale_x_continuous(limits = c(0,1)) +
+   labs(y="Relative severity") +
+   theme(legend.position="none")
+
+fluxapyroxad_data = data.frame(Dose = c(0,0.25,0.5,1.0),
+                          sev_2012 = c(1.0,0.04,0.1,0.1),
+                          sev_2013 = c(1.0,0.15,0.08,0.06),
+                          sev_2014 = c(1.0,0.36,0.18,0.09),
+                          sim = rep(NA,4))
+fig3.4 <- ggplot(subset(dr_curve_2,Fung=="SDHI"),aes(x=Dose,y=rel_sev,linetype=Res,colour=Case)) +
+   geom_line() +
+   geom_line(data = subset(dr_curve_2,Fung=="SDHI" & Case == 1 & Res == "R"),aes(x=Dose,y=rel_sev)) +
+   geom_point(data=fluxapyroxad_data,aes(x=Dose,y=sev_2012,linetype="S"),col=1) +
+   geom_point(data=fluxapyroxad_data,aes(x=Dose,y=sev_2013,linetype="S"),col=1) +
+   geom_point(data=fluxapyroxad_data,aes(x=Dose,y=sev_2014,linetype="S"),col=1) +
+   theme_classic() +
+   scale_y_continuous(limits = c(0,1)) +
+   scale_color_discrete(type = c("black","red")) +
+   labs(y="Relative severity") +
+   theme(legend.position="none")
+
+fig3.5 <- ggplot(subset(dr_curve_2,Fung=="Multi-site"),aes(x=Dose,y=rel_sev,linetype=Res,col=Case)) +
+   geom_line() +
+   theme_classic() +
+   scale_y_continuous(limits = c(0,1)) +
+   scale_color_discrete(type = c("black","red")) +
+   labs(y="Relative severity") +
+   theme(legend.position="none")
+
+```
+
+```{r seed_treatments}
+
+for(fung_i in 1:3){
+   
+   # Seed treatment - two fields, one with seed treatment, one with foliar applied spray
+   parms <- default_par()
+   parms$seed_treatment_coefficient = c(0.95,0.25,1.2) # Use the new coefficients
+   parms$n_fields = 3
+   parms$n_years = 1
+   parms$field_size = c(0.5,0.25,0.25)
+   parms$management = subset(parms$management,Field<3 & Fungicide == 1 & Year ==1)
+   parms$management$Time[1] = 600
+   parms$management$Time[2] = 0
+   parms$management$Fungicide = fung_i
+   parms$initial_resistance_frequency = c(0,0)
+   parms$mutation_rate = 0.0
+   
+   sim <- simulate(parms) |> 
+      calculate_severity() |> 
+      pivot_longer(cols = starts_with("field"),names_to="Treatment",names_prefix="field.",values_to="sev")
+   
+   sim$Treatment[sim$Treatment == 1] = "Foliar"
+   sim$Treatment[sim$Treatment == 2] = "Seed"
+   sim$Treatment[sim$Treatment==3] = "No control"
+   sim$Treatment = factor(sim$Treatment,levels=c("No control","Foliar","Seed"))
+   
+   sim <- cbind(sim,Fung=fung_i)
+   
+   if(fung_i == 1){
+      st_foliar <- sim
+   } else st_foliar <- rbind(st_foliar,sim)
+   
+}
+
+fig3.6<- ggplot(subset(st_foliar,Fung==3),aes(x=time,y=100*sev,linetype=Treatment)) +
+   geom_line() +
+   labs(x="Time (degree days)",y="Severity (%)",linetype="Treatment:",colour="Fungicide:") +
+   theme_classic() +
+   geom_vline(xintercept = 1 + 1000 / 1200) +
+   scale_y_continuous(limits=c(0,100)) +
+   #theme(legend.position="none")
+   theme(legend.position=c(.4,.75))
+
+```
+
+```{r fig3}
+
+plot3 <- ggarrange(fig3.1 + labs(tag="A"),
+                   fig3.2 + labs(tag="B"),
+                   fig3.6 + labs(tag="C"),
+                   fig3.3 + labs(tag="D") + ggtitle("Propiconazole"),
+                   fig3.4 + labs(tag="E") + ggtitle("Fluxapyroxad"),
+                   fig3.5 + labs(tag="F") + ggtitle("Third fungicide"))
+
+if(SAVE) ggsave("fig3.png",plot3,width=7,height=5)
+
+```
+
+### Figure 4
+
+Figure 4 plots the disease progress curves in four situations.
+
+1. No sprays
+2. A single foliar application at T2
+3. Foliar sprays at T1 and T2
+4. Seed treatment, and foliar sprays at T1 and T2.
+
+```{r figure_4}
+
+fig4_sim <- data.frame()
+
+# HLIR with no sprays
+par = default_par()
+par$management = data.frame(Field=numeric(),Fungicide = numeric(),Year=numeric(),Time=numeric(),Dose=numeric())
+par$n_years = 1
+abc = simulate(par) |> calculate_SLIR() |> group_by(Field) |> pivot_longer(cols = !c(1,2,3,4),names_to = "State")
+fig4.1 <- ggplot(subset(abc,Field==1),aes(x=time,y=value,col=State)) + 
+  geom_line(size = 1) +
+  ggtitle("No sprays") +
+   labs(y="Area index",x="Time (degree days)") +
+   #scale_y_continuous(limits = c(0,2.5)) +
+   theme_classic() +
+   theme(axis.text.x = element_blank())
+
+# HLIR with 1 spray at T2
+par = default_par()
+par$management = data.frame(Field=1,Fungicide = 1,Year=1,Time=700,Dose=1)
+par$n_years = 1
+abc = simulate(par) |> calculate_SLIR() |> pivot_longer(cols = !c(1,2,3,4),names_to = "State")
+fig4.2 <- ggplot(subset(abc,Field==1),aes(x=time,y=value,col=State)) + 
+  geom_line(size = 1) +
+  ggtitle("Spray at T2") +
+  labs(y="Area index",x="Time (degree days)") +
+  #scale_y_continuous(limits = c(0,2.5)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank())
+
+# HLIR with 2 sprays at T1 and T2
+par = default_par()
+par$management = data.frame(Field=1,Fungicide = 1,Year=1,Time=c(400,700),Dose=1)
+par$n_years = 1
+abc = simulate(par) |> calculate_SLIR() |> pivot_longer(cols = !c(1,2,3,4),names_to = "State")
+fig4.3 <- ggplot(subset(abc,Field==1),aes(x=time,y=value,col=State)) + 
+  geom_line(size = 1) +
+  ggtitle("Sprays at T1 & T2") +
+  labs(y="Area index",x="Time (degree days)") +
+  #scale_y_continuous(limits = c(0,2.5)) +
+  theme_classic() +
+  theme(axis.text.x = element_blank())
+
+# HLIR with 3 sprays (T0, T1, T2)
+par = default_par()
+par$management = data.frame(Field=1,Fungicide = 1,Year=1,Time=c(0,400,700),Dose=1)
+par$n_years = 1
+abc = simulate(par) |> calculate_SLIR() |> pivot_longer(cols = !c(1,2,3,4),names_to = "State")
+fig4.4 <- ggplot(subset(abc,Field==1),aes(x=time,y=value,col=State)) + 
+  geom_line(size = 1) +
+  ggtitle("Seed treatment, T1 & T2") +
+  labs(y="Area index",x="Time (degree days)") +
+  #scale_y_continuous(limits = c(0,2.5)) +
+  theme_classic() +
+  theme(
+  axis.text.x = element_blank(),
+  axis.line = element_line(),)
+
+plot4 <- ggarrange(fig4.1 + labs(tag="A"),
+                   fig4.2 + labs(tag="B"),
+                   fig4.3 + labs(tag="C"),
+                   fig4.4 + labs(tag="D"),
+                   common.legend=TRUE,legend="right")
+
+if(SAVE) ggsave("fig4.png",plot4,width=6,height=4)
+
+```
+
+## Results
+
+### Case 1
+
+In Case 1, control is ineffective only when resistance develops to both fungicide MOAs.
+
+I first plot the HADs, to show the HAD in each case when resistance has developed to none, one, or both mode of actions (MOAs).
+
+```{r HAD_0}
+
+pars <- default_par()
+pars$n_years = 1
+pars$transmission_rate = 0.0
+
+HAD_0 = pars |> simulate() |> calculate_HAD()
+HAD_0 = HAD_0$field.1[1]
+
+```
+
+```{r HADs}
+
+HADs = data.frame(Field = rep(seq(5),each=4),Exp = rep(seq(4),times=5),HAD=NA)
+
+params = default_par()
+params$n_years = 1
+
+for(i in 1:nrow(HADs)){
+  
+  if(HADs$Field[i] == 1){
+    # Field 1
+    params$management = data.frame(Field = 1,Fungicide = c(2,1,3),Year=1,Time = c(0,400,700),Dose=1)
+  } else if(HADs$Field[i] == 2){
+    # Field 1 - mixture
+    params$management = data.frame(Field = 1,Fungicide = c(3,1,2,3),Year=1,Time = c(0,400,400,700),Dose=c(1,0.5,0.5,1))
+  } else if(HADs$Field[i] == 3){
+    # Field 2 - azole
+    params$management = data.frame(Field = 1,Fungicide = c(3,1,3),Year=1,Time = c(0,400,700),Dose=1)
+  } else if(HADs$Field[i] == 4){
+    # Field 2 - SDHI
+    params$management = data.frame(Field = 1,Fungicide = c(2,3,3),Year=1,Time = c(0,400,700),Dose=1)
+  } else if(HADs$Field[i] == 5){
+    # Field 3
+    params$management = data.frame(Field = 1,Fungicide = c(3,3,3),Year=1,Time = c(0,400,700),Dose=1)
+  }
+  
+  if(HADs$Exp[i] == 1){
+    params$initial_resistance_frequency = c(0,0)
+  } else if(HADs$Exp[i] == 2){
+    params$initial_resistance_frequency = c(1,0)
+  } else if(HADs$Exp[i] == 3){
+    params$initial_resistance_frequency = c(0,1)
+  } else if(HADs$Exp[i] == 4){
+    params$initial_resistance_frequency = c(1,1)
+  }
+  
+  tmp = params |> simulate() |> calculate_HAD()
+  HADs$HAD[i] = tmp[1,2]
+}
+
+HADs$Field = factor(rep(c("1 - alt","1 - mix","2 - azole","2 - SDHI","3"),each=4))
+HADs$Exp = factor(rep(c("Susceptible","Resistant to azole","Resistant to SDHI","Resistant to both"),times=5),
+                  levels = c("Susceptible","Resistant to azole","Resistant to SDHI","Resistant to both"))
+
+HADs_C1 <- 
+   ggplot(HADs,aes(fill=factor(Exp),y=HAD,x=Field)) +
+     geom_bar(position="dodge",stat="identity") +
+     theme_light() +
+     geom_hline(yintercept=HAD_0) + geom_hline(yintercept=HAD_0 * 0.9,linetype=2) +
+     labs(y="HAD",fill="Resistance:",x="Field")
+
+if(SAVE) ggsave(filename="HAD_C1.png",HADs_C1,width=7,height=3)
+
+```
+
+Figure. The HAD under each spray programme in the landscape when the pathogen population is either susceptible, resistant to the azole, resistant to the SDHI, or resistant to both MoAs. From left to right, each block is: Field 1, with an alternation; Field 1 with a mixture; Field 2 with an azole; Field 2 with an SDHI; Field 3. For details of the spray programmes, see Table 2 in the main paper.
+
+We can now calculate the effective life under different proportions of field 2.
+
+```{r figure_5}
+
+if(RESIM){
+
+   figure5<-expand.grid(
+      Strategy = c("Mixture","Alternation"),
+      Field2 = c("Azole","SDHI"),
+      sex_prop = c(0,0.5,1),
+      disp = c(0.2,0.5,1.0),
+      p_field_2 = seq(0,0.5,0.05),
+      EL=NA)
+   
+   cl <- makeCluster(detectCores()-1)
+   clusterEvalQ(cl,library(NetBlotch))
+   clusterExport(cl,c("figure5","default_par","HAD_0","create_management"))
+   figure5$EL = parSapply(cl,seq_len(nrow(figure5)),function(x) {
+     
+     par = default_par()
+     
+     if(figure5$Strategy[x] == "Mixture"){
+       n_years = par$n_years
+       par$management$Fungicide[par$management$Field == 1] = 3
+       par$management$Fungicide[par$management$Field == 1 & par$management$Time == 400] = 2
+       par$management$Dose[par$management$Field == 1 & par$management$Time == 400] = 0.5
+       par$management = rbind(par$management,data.frame(Field=1,Fungicide=1,Year=seq_len(n_years),Time=400,Dose=0.5))
+     }
+     
+     if(figure5$Field2[x] == "SDHI"){
+         par$management$Fungicide[par$management$Field == 2] = 3
+         par$management$Fungicide[par$management$Field == 2 & par$management$Time == 0] = 2
+     }
+     
+     par$sex_prop = figure5$sex_prop[x]
+     par$overwinter_dispersal_proportion = figure5$disp[x]
+     par$field_size[2] = figure5$p_field_2[x]
+     par$field_size[3] = 0.5 - figure5$p_field_2[x]
+     
+     EL <- simulate(par) |> calculate_effective_life(max_HAD = HAD_0,threshold=10)
+     EL[1]
+     
+   })
+   stopCluster(cl)
+   
+} else figure5 = read.csv("./figure5.csv")
+
+plot5 <- 
+   ggplot(figure5,aes(x=p_field_2,y=EL,linetype=factor(disp))) +
+      geom_line() +
+      facet_nested(sex_prop ~ Strategy + Field2) +
+      labs(x="Proportion field 2",y="Effective life",colour = "Sex prop.",linetype="Dispersal prop.") +
+      coord_cartesian(ylim=c(0,50)) +
+      theme_classic()+
+      theme(panel.border = element_rect(colour = "black", fill=NA, linewidth=1))
+
+if(SAVE) ggsave("fig5.png",plot5,width=7,height=5)
+
+if(RESIM) write.csv(figure5,file="figure5.csv")
+
+```
+
+### Case 2
+
+In Case 2, control is ineffective when resistance develops to either of the fungicide MOAs.
+
+```{r HADs_case2}
+
+HADs_2 = data.frame(Field = rep(seq(5),each=4),Exp = rep(seq(4),times=5),HAD=NA)
+
+params = default_par()
+params$dose_response_asymptote[2,c(1,2)] = 0.5
+params$dose_response_asymptote[3,] = 0.3
+params$n_years = 1
+
+for(i in 1:nrow(HADs_2)){
+  
+  if(HADs_2$Field[i] == 1){
+    # Field 1
+    params$management = data.frame(Field = 1,Fungicide = c(2,1,3),Year=1,Time = c(0,400,700),Dose=1)
+  } else if(HADs_2$Field[i] == 2){
+    # Field 1 - mixture
+    params$management = data.frame(Field = 1,Fungicide = c(3,1,2,3),Year=1,Time = c(0,400,400,700),Dose=c(1,0.5,0.5,1))
+  } else if(HADs_2$Field[i] == 3){
+    # Field 2 - azole
+    params$management = data.frame(Field = 1,Fungicide = c(3,1,3),Year=1,Time = c(0,400,700),Dose=1)
+  } else if(HADs_2$Field[i] == 4){
+    # Field 2 - SDHI
+    params$management = data.frame(Field = 1,Fungicide = c(2,3,3),Year=1,Time = c(0,400,700),Dose=1)
+  } else if(HADs_2$Field[i] == 5){
+    # Field 3
+    params$management = data.frame(Field = 1,Fungicide = c(3,3,3),Year=1,Time = c(0,400,700),Dose=1)
+  }
+  
+  if(HADs_2$Exp[i] == 1){
+    params$initial_resistance_frequency = c(0,0)
+  } else if(HADs_2$Exp[i] == 2){
+    params$initial_resistance_frequency = c(1,0)
+  } else if(HADs_2$Exp[i] == 3){
+    params$initial_resistance_frequency = c(0,1)
+  } else if(HADs_2$Exp[i] == 4){
+    params$initial_resistance_frequency = c(1,1)
+  }
+  
+  tmp = params |> simulate() |> calculate_HAD()
+  HADs_2$HAD[i] = tmp[1,2]
+  
+}
+
+HADs_2$Field = factor(rep(c("1 - alt","1 - mix","2 - azole","2 - SDHI","3"),each=4))
+HADs_2$Exp = factor(rep(c("Susceptible","Resistant to azole","Resistant to SDHI","Resistant to both"),times=5),
+                  levels = c("Susceptible","Resistant to azole","Resistant to SDHI","Resistant to both"))
+
+HAD_C2 <- 
+   ggplot(HADs_2,aes(fill=factor(Exp),y=HAD,x=Field)) +
+     geom_bar(position="dodge",stat="identity") +
+     theme_light() +
+     geom_hline(yintercept=HAD_0) + geom_hline(yintercept=HAD_0 * 0.9,linetype=2) +
+     labs(y="HAD",fill="Resistance:",x="Field")
+
+if(SAVE) ggsave(filename="HAD_C2.png",HAD_C2,width=7,height=3)
+
+```
+
+Figure. The HAD under each spray programme in the landscape when the pathogen population is either susceptible, resistant to the azole, resistant to the SDHI, or resistant to both MoAs. From left to right, each block is: Field 1, with an alternation; Field 1 with a mixture; Field 2 with an azole; Field 2 with an SDHI; Field 3. For details of the spray programmes, see Table 2 in the main paper.
+
+```{r figure_6}
+
+if(RESIM){
+
+   figure6<-expand.grid(
+      Strategy = c("Mixture","Alternation"),
+      Field2 = c("Azole","SDHI"),
+      sex_prop = c(0,0.5,1),
+      disp = c(0.2,0.5,1.0),
+      p_field_2 = seq(0,0.5,0.05),
+      EL=NA)
+   
+   cl <- makeCluster(detectCores()-1)
+   clusterEvalQ(cl,library(NetBlotch))
+   clusterExport(cl,c("figure6","default_par","HAD_0"))
+   figure6$EL = parSapply(cl,seq_len(nrow(figure6)),function(x) {
+     
+     par = default_par()
+     par$dose_response_asymptote[2,c(1,2)] = 0.5
+     par$dose_response_asymptote[3,] = 0.3
+     
+     if(figure6$Strategy[x] == "Mixture"){
+        n_years = par$n_years
+        par$management$Fungicide[par$management$Field == 1] = 3
+        par$management$Fungicide[par$management$Field == 1 & par$management$Time == 400] = 2
+        par$management$Dose[par$management$Field == 1 & par$management$Time == 400] = 0.5
+        par$management = rbind(par$management,data.frame(Field=1,Fungicide=1,Year=seq_len(n_years),Time=400,Dose=0.5))
+     }
+     
+     if(figure6$Field2[x] == "SDHI"){
+         par$management$Fungicide[par$management$Field == 2] = 3
+         par$management$Fungicide[par$management$Field == 2 & par$management$Time == 0] = 2
+     }
+     
+     par$sex_prop = figure6$sex_prop[x]
+     par$overwinter_dispersal_proportion = figure6$disp[x]
+     par$field_size[2] = figure6$p_field_2[x]
+     par$field_size[3] = 0.5 - figure6$p_field_2[x]
+     
+     EL <- simulate(par) |> 
+       calculate_effective_life(max_HAD = HAD_0,threshold=10)
+     EL[1]
+     
+   })
+   
+   stopCluster(cl)
+   
+} else figure6 = read.csv("./figure6.csv")
+
+plot6 <- 
+   ggplot(figure6,aes(x=p_field_2,y=EL,linetype=factor(disp))) +
+      geom_line() +
+      facet_nested(sex_prop ~ Strategy + Field2) +
+      labs(x="Proportion field 2",y="Effective life",colour = "Sex prop.",linetype="Dispersal prop.") +
+      coord_cartesian(ylim=c(0,50)) +
+      theme_classic()+
+      theme(panel.border = element_rect(colour = "black", fill=NA, linewidth=1))
+
+if(SAVE) ggsave("fig6.png",plot6,width=7,height=5)
+
+if(RESIM) write.csv(figure6,file="figure6.csv")
+
+```
+
+## Explanation
+
+The following figure plots the strain frequency over time under different scenarios.
+
+As all cases are too complicated for the paper, several subsets were selected for the paper figure.
+
+```{r figure7}
+
+fig7 <- expand.grid(
+   prop_field_2 = c(0,0.25,0.5),
+   field_2 = c("Azole","SDHI"),
+   Strat = c("Alt","Mix"),
+   Case = c(1,2),
+   sex = c(FALSE,TRUE))
+
+cl<-makeCluster(detectCores()-1)
+
+clusterExport(cl,c("fig7","default_par"))
+clusterEvalQ(cl,{library(deSolve);library(NetBlotch)})
+
+sims_fig7 = parLapply(cl,X=seq(1,nrow(fig7)),fun=function(i) {
+   
+   parms <- default_par()
+   parms$n_years = 50
+   parms$sex_prop = 0.0
+   parms$overwinter_dispersal_proportion = 1.0
+   parms$field_size = c(0.5,fig7$prop_field_2[i],0.5-fig7$prop_field_2[i])
+
+   if(fig7$Case[i] == 2){
+      parms$dose_response_asymptote[2,c(1,2)] = 0.5
+      parms$dose_response_asymptote[3,] = 0.3
+   }
+   
+   if(fig7$Strat[i] == "Mix"){
+       n_years = parms$n_years
+       parms$management$Fungicide[parms$management$Field == 1] = 3
+       parms$management$Fungicide[parms$management$Field == 1 & parms$management$Time == 400] = 2
+       parms$management$Dose[parms$management$Field == 1 & parms$management$Time == 400] = 0.5
+       parms$management = rbind(parms$management,data.frame(Field=1,Fungicide=1,Year=seq_len(n_years),Time=400,Dose=0.5))
+  }
+  
+  if(fig7$field_2[i] == "SDHI"){
+      parms$management$Fungicide[parms$management$Field == 2] = 3
+      parms$management$Fungicide[parms$management$Field == 2 & parms$management$Time == 0] = 2
+  }
+   
+   if(fig7$sex[i] == TRUE){
+    parms$sex_prop = 1.0
+   }
+   
+   sim <- parms |> simulate() |> 
+     calculate_strain_frequency() |> 
+     subset(DD==1200 & Field == 1)
+   
+   sim
+   
+})
+
+stopCluster(cl)
+
+fig7_sims_all <- cbind(sims_fig7[[1]],fig7[1,])
+for(i in 2:nrow(fig7)) fig7_sims_all <- rbind(fig7_sims_all,cbind(sims_fig7[[i]],fig7[i,]))
+
+## Now, we want to extract the rows that Frank wants in the figure:
+fig7_sims = fig7_sims_all |> subset(
+  (Case == 1 & sex == FALSE & Strat == "Mix") | 
+    (Case == 1 & sex == TRUE & Strat == "Alt") | 
+    (Case == 2 & sex == FALSE & Strat == "Mix")
+)
+
+plot7 <- ggplot(fig7_sims,aes(x=Year,y=Freq,color=factor(Strain))) +
+   geom_line() +
+   facet_nested(Case + sex + Strat + field_2 ~ prop_field_2) +
+   theme_classic()+
+   theme(panel.border = element_rect(colour = "black", fill=NA, size=1))
+
+if(SAVE) ggsave("fig7.png",plot7,width=7,height=5)
+
+```
+
+## Appendix
+
+### Mutation rate
+
+Reviewer 2 asked if we could test the sensitivity of our results to the mutation rate.
+
+To do so, we looked at the effective life in a subset of the above tests, with three levels of mutation rate.
+
+```{r figure_A1_mutation}
+
+if(RESIM){
+
+   figureA1<-expand.grid(
+      Strategy = c("Alternation","Mixture"),
+      Field2 = c("Azole","SDHI"),
+      sex_prop = c(0,1),
+      disp = c(0.2,0.5,1.0),
+      p_field_2 = seq(0,0.5,0.1),
+      mutation_rate = c(1e-7,1e-5,1e-3),
+      EL=NA)
+   
+   cl <- makeCluster(detectCores()-1)
+   clusterEvalQ(cl,library(NetBlotch))
+   clusterExport(cl,c("figureA1","default_par","HAD_0","create_management"))
+   figureA1$EL = parSapply(cl,seq_len(nrow(figureA1)),function(x) {
+     
+     par = default_par()
+     
+     if(figureA1$Strategy[x] == "Mixture"){
+       n_years = par$n_years
+       par$management$Fungicide[par$management$Field == 1] = 3
+       par$management$Fungicide[par$management$Field == 1 & par$management$Time == 400] = 2
+       par$management$Dose[par$management$Field == 1 & par$management$Time == 400] = 0.5
+       par$management = rbind(par$management,data.frame(Field=1,Fungicide=1,Year=seq_len(n_years),Time=400,Dose=0.5))
+     }
+     
+     if(figureA1$Field2[x] == "SDHI"){
+         par$management$Fungicide[par$management$Field == 2] = 3
+         par$management$Fungicide[par$management$Field == 2 & par$management$Time == 0] = 2
+     }
+     
+     par$sex_prop = figureA1$sex_prop[x]
+     par$overwinter_dispersal_proportion = figureA1$disp[x]
+     par$mutation_rate = figureA1$mutation_rate[x]
+     
+     par$field_size[2] = figureA1$p_field_2[x]
+     par$field_size[3] = 0.5 - figureA1$p_field_2[x]
+     
+     EL <- simulate(par) |> calculate_effective_life(max_HAD = HAD_0,threshold=10)
+     EL[1]
+     
+   })
+   stopCluster(cl)
+   
+} else figureA1 = read.csv("./figureA1.csv")
+
+plotA1 <- 
+   ggplot(figureA1,aes(x=p_field_2,y=EL,linetype=factor(disp))) +
+      geom_line() +
+      facet_nested(sex_prop ~ Strategy + Field2) +
+      labs(x="Proportion field 2",y="Effective life",colour = "Sex prop.",linetype="Dispersal prop.") +
+      coord_cartesian(ylim=c(0,50)) +
+      theme_classic()+
+      theme(panel.border = element_rect(colour = "black", fill=NA, linewidth=1))
+
+if(SAVE) ggsave("figA1.png",plotA1,width=7,height=5)
+
+if(RESIM) write.csv(figureA1,file="figureA1.csv")
+
+```
+
+### Fitness cost
+
+Reviewer 2 also asked about an "adaptation cost", which we assume means "fitness cost".
+
+Fitness cost implies that the fitness of resistant individuals is reduced, and we want to test this with a fitness cost on the transmission rate.
+
+If we say that the transmission rate, $\theta = 0.1$, then we say that for those genotypes with a single resistance allele the transmission rate is reduced by $(1-\theta)$, i.e. 90%.
+
+```{r figure_A2_fitness_cost}
+
+if(RESIM){
+
+   figureA2<-expand.grid(
+      Strategy = c("Mixture","Alternation"),
+      Field2 = c("Azole","SDHI"),
+      sex_prop = c(0,1),
+      disp = c(0.2,0.5,1.0),
+      p_field_2 = seq(0,0.5,0.1),
+      trans_fc = c(1.0,0.9,0.8),
+      EL=NA)
+   
+   cl <- makeCluster(detectCores()-1)
+   clusterEvalQ(cl,library(NetBlotch))
+   clusterExport(cl,c("figureA2","default_par","HAD_0","create_management"))
+   figureA2$EL = parSapply(cl,seq_len(nrow(figureA2)),function(x) {
+     
+     par = default_par()
+     
+     if(figureA2$Strategy[x] == "Mixture"){
+       n_years = par$n_years
+       par$management$Fungicide[par$management$Field == 1] = 3
+       par$management$Fungicide[par$management$Field == 1 & par$management$Time == 400] = 2
+       par$management$Dose[par$management$Field == 1 & par$management$Time == 400] = 0.5
+       par$management = rbind(par$management,data.frame(Field=1,Fungicide=1,Year=seq_len(n_years),Time=400,Dose=0.5))
+     }
+     
+     if(figureA2$Field2[x] == "SDHI"){
+         par$management$Fungicide[par$management$Field == 2] = 3
+         par$management$Fungicide[par$management$Field == 2 & par$management$Time == 0] = 2
+     }
+     
+     par$sex_prop = figureA2$sex_prop[x]
+     par$overwinter_dispersal_proportion = figureA2$disp[x]
+     par$transmission_fitness_cost = figureA2$trans_fc[x]
+     
+     par$field_size[2] = figureA2$p_field_2[x]
+     par$field_size[3] = 0.5 - figureA2$p_field_2[x]
+     
+     EL <- simulate(par) |> calculate_effective_life(max_HAD = HAD_0,threshold=10)
+     EL[1]
+     
+   })
+   stopCluster(cl)
+   
+} else figureA2 = read.csv("./figureA2.csv")
+
+plotA2 <- 
+   ggplot(figureA2,aes(x=p_field_2,y=EL,linetype=factor(disp))) +
+      geom_line() +
+      facet_nested(sex_prop ~ Strategy + Field2) +
+      labs(x="Proportion field 2",y="Effective life",colour = "Sex prop.",linetype="Dispersal prop.") +
+      coord_cartesian(ylim=c(0,50)) +
+      theme_classic()+
+      theme(panel.border = element_rect(colour = "black", fill=NA, linewidth=1))
+
+if(SAVE) ggsave("figA2.png",plotA2,width=7,height=5)
+
+if(RESIM) write.csv(figureA2,file="figureA2.csv")
+
+```
